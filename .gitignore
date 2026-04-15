@@ -9,7 +9,8 @@ out/
 
 # Docs
 docs/
-lib/
+./lib/chainlink-brownie-contracts/
+./lib/forge-std/
 
 # Dotenv file
 .env
