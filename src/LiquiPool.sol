@@ -175,5 +175,8 @@ contract LiquiPoolHandler is VRFConsumerBaseV2Plus {
     function getWhetherPlayerIsAllowedOrNot(address player) public view returns(bool) {
         return s_isAllowed[player];
     }
-    
+
+    function getAllowedPlayers() public view returns(address[] memory) {
+        return s_allowedPlayers;
+    }
 }
