@@ -19,6 +19,9 @@ contract LiquiPoolVault {
     error LiquiPoolVault__NotEnoughBidAmount();
     error LiquiPoolVault__AlreadyWonBid();
     error LiquiPoolVault__BidWindowIsOpen();
+    error LiquiPoolVault__AllMonthsCompleted();
+    error LiquiPoolVault__IsNotRunning();
+
 
   
 
@@ -62,6 +65,15 @@ contract LiquiPoolVault {
 
          _;
     }
+
+    modifier isDrawRunning() {
+        if(poolHandler.getPoolState() != LiquiPoolHandler.LiquiPoolState.RUNNING)
+        {
+            revert LiquiPoolVault__IsNotRunning();
+        }
+        _;
+    }
+
 
 
 
@@ -160,7 +172,7 @@ contract LiquiPoolVault {
 
 
 
-    function submitMonthlyDepositOnBehalfOfOther(address player) public payable onlyPoolMaker
+    function submitMonthlyDepositOnBehalfOfOther(address player) public payable onlyPoolMaker isDrawRunning
     {
           if(msg.value < poolHandler.getPerPersonContributionPerMonth())
             {
@@ -185,7 +197,7 @@ contract LiquiPoolVault {
 
     
      /** Player's functions  */
-      function contributeMonthly() public payable {
+      function contributeMonthly() public payable isDrawRunning {
             if(msg.value < poolHandler.getPerPersonContributionPerMonth())
             {
             revert LiquiPoolVault__NotEnoughMonthlyDeposit();
@@ -205,7 +217,7 @@ contract LiquiPoolVault {
             emit MonthlyDepositSubmitted(msg.sender);
       }
 
-      function makeBidForThisMonth(uint256 _bidAmount) public isBidWindowOpen {
+      function makeBidForThisMonth(uint256 _bidAmount) public isBidWindowOpen isDrawRunning {
            if(_bidAmount <= s_currentMinBid)
            {
             revert LiquiPoolVault__NotEnoughBidAmount();
@@ -234,15 +246,34 @@ contract LiquiPoolVault {
           emit newBidPlaced(msg.sender, _bidAmount);
       }
 
-      function openBidWindow() public  {
+      function openBidWindow() public onlyPoolMaker isDrawRunning {
           s_isBidWindowOpen = true;
       }
 
-      function closeBidWindow() public {
+      function closeBidWindow() public onlyPoolMaker isDrawRunning {
           s_isBidWindowOpen = false;
       }
 
-    function distributeMonthlyDeposit() public payable isBidWindowClosed {
+
+      function checkUpKeep() public isBidWindowClosed isDrawRunning {
+          if(poolHandler.getPoolState() != LiquiPoolHandler.LiquiPoolState.RUNNING)
+          {
+            revert LiquiPoolVault__IsNotRunning();
+          }
+
+          if(s_holderOfEachMonth.length >= poolHandler.getAllowedPlayers().length || s_remainingPlayers.length == 0)
+          {
+            revert LiquiPoolVault__AllMonthsCompleted();
+          }
+      }
+
+
+
+    /** Internal Functions */
+    function _distributeMonthlyDeposit() public payable isBidWindowClosed isDrawRunning {
+    
+         checkUpKeep();
+
           uint256 totalPoolThisMonth = poolHandler.getPerPersonContributionPerMonth() * poolHandler.getAllowedPlayers().length;
 
 
@@ -302,11 +333,9 @@ contract LiquiPoolVault {
    
         s_currentMinBidder = address(0);
         s_currentMinBid = totalPoolThisMonth;
-      }
+ }
 
-
-
-
+ 
 
 
 }

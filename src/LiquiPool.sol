@@ -2,14 +2,8 @@
 
 pragma solidity ^0.8.19;
 
-import {
-    VRFConsumerBaseV2Plus
-} from "../lib/chainlink-brownie-contracts/contracts/src/v0.8/vrf/dev/VRFConsumerBaseV2Plus.sol";
-import {
-    VRFV2PlusClient
-} from "../lib/chainlink-brownie-contracts/contracts/src/v0.8/vrf/dev/libraries/VRFV2PlusClient.sol";
 
-contract LiquiPoolHandler is VRFConsumerBaseV2Plus {
+contract LiquiPoolHandler {
     /**
      * ERRORS
      */
@@ -47,29 +41,18 @@ contract LiquiPoolHandler is VRFConsumerBaseV2Plus {
     uint256 public s_perPersonContributionPerMonth;
     uint256 public s_poolMakerSecurityDeposit;
 
-    bytes32 private immutable i_keyHash;
-    uint256 private immutable i_subId;
-    uint32 private immutable i_callbackGasLimit;
-
-    uint16 private immutable REQUEST_CONFIRMATIONS = 4;
 
     constructor(
-        address _poolManager,
-        address _vrfCoordinator,
-        bytes32 _keyHash,
-        uint256 _subId,
-        uint32 _callbackGasLimit,
+        address _poolManager, 
         uint256 _perPersonContributionPerMonth,
         uint256 _poolMakerSecurityDeposit
-    ) VRFConsumerBaseV2Plus(_vrfCoordinator) {
+    ) {
         s_poolState = LiquiPoolState.OPEN;
         s_poolManager = _poolManager;
         i_owner = msg.sender;
         s_perPersonContributionPerMonth = _perPersonContributionPerMonth;
         s_poolMakerSecurityDeposit = _poolMakerSecurityDeposit;
-        i_keyHash = _keyHash;
-        i_callbackGasLimit = _callbackGasLimit;
-        i_subId = _subId;
+        
     }
 
     /**
@@ -139,10 +122,6 @@ contract LiquiPoolHandler is VRFConsumerBaseV2Plus {
         emit PlayerRemovedFromPool(requester);
     }
 
-
-    function fulfillRandomWords(uint256 requestId, uint256[] calldata randomWords) internal override{
-
-    }
 
     /**
      * OWNER ONLY FUNCTIONS
