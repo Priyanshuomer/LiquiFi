@@ -163,4 +163,17 @@ contract LiquiPoolHandler is VRFConsumerBaseV2Plus {
     function getPerPersonContributionPerMonth() public view returns(uint256) {
         return s_perPersonContributionPerMonth;
     }
+
+    function getPoolMakerSecurityDeposit() public view returns(uint256) {
+        return s_poolMakerSecurityDeposit;
+    }
+
+    function getPoolState() public view returns(LiquiPoolState) {
+        return s_poolState;
+    }
+
+    function getWhetherPlayerIsAllowedOrNot(address player) public view returns(bool) {
+        return s_isAllowed[player];
+    }
+    
 }
