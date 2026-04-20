@@ -1,7 +1,12 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.19;
+pragma solidity ^0.8.24;
 
 import { LiquiPoolHandler } from "./LiquiPool.sol";
+import { IERC20 } from "../lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
+import { SafeERC20 } from "../lib/openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol";
+import { LiquiPoolRandom } from "./LiquiPoolRandom.sol";
+
+
 
 /**
  * @title LiquiPoolVault
@@ -13,23 +18,23 @@ import { LiquiPoolHandler } from "./LiquiPool.sol";
  */
 contract LiquiPoolVault {
 
+    using SafeERC20 for IERC20;
+
    /*** ERRORS  */
     /// @notice Thrown when a non-pool-manager calls a manager-restricted function
     error LiquiPoolVault__OnlyPoolManager();
 
+    /// @notice Thrown when a non-LiquiPoolRandom contract calls a manager-restricted function
+    error LiquiPoolVault__OnlyLiquiPoolRandom();
+
     error LiquiPoolVault__ContributionWindowClosed();
 
-    /// @notice Thrown when fund transfer to a recipient fails
-    error LiquiPoolVault__TransferFailed(address recipient, uint256 amount);
-
-    /// @notice Thrown when submitted security deposit is below the required amount
-    error LiquiPoolVault__InsufficientSecurityDeposit();
+    error LiquiPoolVault__RandomAlreadySet();
+  
 
     /// @notice Thrown when there is no security deposit balance to release
     error LiquiPoolVault__NoSecurityDepositToRelease();
 
-    /// @notice Thrown when submitted monthly contribution is below the required amount
-    error LiquiPoolVault__InsufficientContribution(uint256 sendingAmount, uint256 requiredAmount);
 
    /// @notice Thrown when there is no sufficient security deposit to contribute on behalf of defaulter 
     error LiquiPoolVault__NotEnoughSecurityBalanceToContribute(address defaulter);
@@ -85,6 +90,8 @@ contract LiquiPoolVault {
     /// @notice Emitted when a member successfully submits their monthly contribution
     event ContributionReceived(address indexed member, uint256 round, uint256 amount);
 
+    event RandomRegistered(address indexed _randomContract);
+
     /// @notice Emitted when a new lowest bid is placed during an active bidding round
     event BidSubmitted(address indexed bidder, uint256 bidAmount, uint256 round);
 
@@ -109,6 +116,8 @@ contract LiquiPoolVault {
     /// @notice Emitted when the full pool cycle is finalized and reset
     event PoolCycleFinalized();
 
+    event RandomNumberIsRequested();
+
  
 
 
@@ -124,6 +133,8 @@ contract LiquiPoolVault {
     /// @notice Current round number (1-indexed, increments after each settlement)
     uint256 private s_currentRound;
 
+    LiquiPoolRandom private s_randomPool;
+
     /// @notice Ordered list of addresses that have received their payout, one per round
     address[] private s_roundWinners;
 
@@ -135,6 +146,10 @@ contract LiquiPoolVault {
 
     /// @notice Whether the current round's funds have been settled and distributed
     bool private s_isCurrentRoundSettled;
+
+    /// @notice ERC20 token used for all pool transactions
+     IERC20 private immutable i_poolToken;
+
 
     // ── Eligible bidders ─────────────────────────
     /// @notice Members who have not yet received a payout — eligible to bid each round
@@ -159,8 +174,7 @@ contract LiquiPoolVault {
     
     /// @notice Timestamp when the current round's primary contribution window opened
     uint256 private s_roundContributionWindowStart;
-    
-
+ 
 
    /**  CONSTRUCTOR   */
 
@@ -168,13 +182,16 @@ contract LiquiPoolVault {
      * @param _poolHandler                 Address of the deployed LiquiPoolHandler contract
      */
     constructor(
-        address _poolHandler
+        address _poolHandler,
+        address _poolToken
     ) {
         i_poolHandler                = LiquiPoolHandler(_poolHandler);
+        i_poolToken                  = IERC20(_poolToken);
        
         s_currentRound               = 0;
         s_isBiddingRoundActive       = false;
         s_isCurrentRoundSettled      = true;
+       
     }
 
 
@@ -185,6 +202,13 @@ contract LiquiPoolVault {
         if (msg.sender != i_poolHandler.getPoolManager()) {
             revert LiquiPoolVault__OnlyPoolManager();
         }
+        _;
+    }
+
+    modifier onlyRandomContract() {
+        if(msg.sender != address(s_randomPool)) 
+        revert LiquiPoolVault__OnlyLiquiPoolRandom();
+
         _;
     }
 
@@ -237,6 +261,76 @@ contract LiquiPoolVault {
     }
 
 
+
+    /** SETUP */
+
+    /**
+     * @notice Registers the PoolRandom contract. Can only be set once.
+     * @dev Called by deploy script after PoolRandom is deployed.
+     * @param _random Address of the deployed LiquiPoolVault
+     */
+    function registerPoolRandom(address _random) external onlyPoolManager {
+        if (address(s_randomPool) != address(0)) revert LiquiPoolVault__RandomAlreadySet();
+        s_randomPool = LiquiPoolRandom(_random);
+        emit RandomRegistered(_random);
+    }
+
+
+    function memberIsRandomlySelected(uint256 randomNumber) external onlyRandomContract {
+             address[] memory allMembers = i_poolHandler.getEnrolledMembers();
+
+            uint256 totalPool = i_poolHandler.getMonthlyContributionAmount() * allMembers.length;
+            address roundWinner;
+            uint256 winnerPayout;
+            uint256 memberDividendTotal;
+            uint256 treasuryAmount;
+
+            randomNumber = randomNumber % s_eligibleBidders.length;
+            roundWinner         = s_eligibleBidders[randomNumber];
+            winnerPayout        = (totalPool * 90) / 100;
+            memberDividendTotal = (totalPool * 5) / 100;
+            treasuryAmount      = totalPool - winnerPayout - memberDividendTotal;
+
+
+        // ── Record winner ────────────────────────
+        s_roundWinners.push(roundWinner);
+        s_hasReceivedPayout[roundWinner] = true;
+
+      
+        // Remove winner from eligible bidders list
+        for (uint256 i = 0; i < s_eligibleBidders.length; i++) {
+            if (s_eligibleBidders[i] == roundWinner) {
+                s_eligibleBidders[i] = s_eligibleBidders[s_eligibleBidders.length - 1];
+                s_eligibleBidders.pop();
+                break;
+            }
+        }
+
+        // ── Distribute member dividends ──────────
+        uint256 perMemberDividend = memberDividendTotal / allMembers.length;
+        uint256 dust              = memberDividendTotal - (perMemberDividend * allMembers.length);
+
+        for (uint256 i = 0; i < allMembers.length; i++) {
+            if (perMemberDividend > 0) {
+               i_poolToken.safeTransfer(allMembers[i], perMemberDividend);
+            }
+        }
+
+        // Dust from dividend rounding goes to treasury
+        treasuryAmount += dust;
+
+        // ── Send treasury amount to pool manager ─
+         i_poolToken.safeTransfer(i_poolHandler.getPoolManager(), treasuryAmount);
+
+        // ── Pay round winner ─────────────────────
+        i_poolToken.safeTransfer(roundWinner, winnerPayout);
+
+        s_isCurrentRoundSettled = true;
+
+        emit RoundSettled(roundWinner, winnerPayout, s_currentRound + 1);
+    }
+
+
   
 
     /***   POOL MANAGER — SECURITY DEPOSIT   */
@@ -248,9 +342,9 @@ contract LiquiPoolVault {
      *      Allows top-ups if the deposit was partially used to cover defaults.
      */
     function lockSecurityDeposit() public payable onlyPoolManager {
-        if (msg.value < i_poolHandler.getRequiredSecurityDeposit()) {
-            revert LiquiPoolVault__InsufficientSecurityDeposit();
-        }
+        uint256 required = i_poolHandler.getRequiredSecurityDeposit();
+        i_poolToken.safeTransferFrom(msg.sender, address(this), required);
+
         i_poolHandler.recordSecurityDepositLocked(msg.value);
         emit SecurityDepositLocked(msg.sender, msg.value);
     }
@@ -269,13 +363,14 @@ contract LiquiPoolVault {
         if (amount == 0) {
             revert LiquiPoolVault__NoSecurityDepositToRelease();
         }
+
+         address _poolManager = i_poolHandler.getPoolManager();
  
         i_poolHandler.recordSecurityDepositReleased();
 
-        (bool success, ) = payable(i_poolHandler.getPoolManager()).call{value: amount}("");
-        if (!success) revert LiquiPoolVault__TransferFailed(i_poolHandler.getPoolManager(), amount);
+        i_poolToken.safeTransfer(_poolManager, amount);
 
-        emit SecurityDepositReleased(msg.sender, amount);
+        emit SecurityDepositReleased(_poolManager, amount);
     }
 
 
@@ -360,6 +455,8 @@ contract LiquiPoolVault {
     }
 
 
+
+
     /**
      * @notice Resets contribution statuses and prepares the contract state for the next round.
      * @dev Must be called after settleCurrentRound(). Increments the round counter.
@@ -431,7 +528,6 @@ contract LiquiPoolVault {
      */
     function submitContributionOnBehalfOf(address member)
         public
-        payable
         onlyPoolManager
         onlyWhenPoolActive
         onlyWhenBiddingClosed
@@ -446,9 +542,7 @@ contract LiquiPoolVault {
 
         uint256 _monthlyContribution = i_poolHandler.getMonthlyContributionAmount();
 
-        if (msg.value < _monthlyContribution) {
-            revert LiquiPoolVault__InsufficientContribution(msg.value, _monthlyContribution);
-        }
+       i_poolToken.safeTransferFrom(msg.sender, address(this), _monthlyContribution);
 
 
         s_hasContributedThisRound[member] = true;
@@ -456,7 +550,7 @@ contract LiquiPoolVault {
 
         i_poolHandler.decreaseScore(member, penaltyDefault);
 
-        emit DefaultCoveredByPoolManager(member, msg.value, s_currentRound + 1);
+        emit DefaultCoveredByPoolManager(member, _monthlyContribution, s_currentRound + 1);
     }
 
 
@@ -471,7 +565,7 @@ contract LiquiPoolVault {
      *      must use coverMemberDefault() instead.
      */
 
-  function contributeMonthly() public payable onlyWhenPoolActive onlyWhenBiddingClosed {
+  function contributeMonthly() public onlyWhenPoolActive onlyWhenBiddingClosed {
             if (!i_poolHandler.isMemberEnrolled(msg.sender)) {
                 revert LiquiPoolVault__CallerIsNotEnrolledMember();
             }
@@ -491,26 +585,27 @@ contract LiquiPoolVault {
 
             (, , , uint256 timelyControBonus , , , , ) = i_poolHandler.getScoreConstants();
 
+            uint256 _amount = _monthlyContribution;
+
             if (inPrimaryWindow) {
                 // On-time — only monthly amount required
-                if (msg.value < _monthlyContribution) {
-                    revert LiquiPoolVault__InsufficientContribution(msg.value, _monthlyContribution);
-                }
+                i_poolToken.safeTransferFrom(msg.sender, address(this), _monthlyContribution);
+
+
                 i_poolHandler.increaseScore(msg.sender, timelyControBonus);
 
             } else if (inGracePeriod) {
                 // Late — must send monthly + penalty together
                 uint256 _graceFee = i_poolHandler.getGracePeriodPenaltyFee();
 
-                if (msg.value < _monthlyContribution + _graceFee) {
-                    revert LiquiPoolVault__InsufficientContribution(msg.value, _monthlyContribution + _graceFee);
-                }
+                i_poolToken.safeTransferFrom(msg.sender, address(this), _monthlyContribution + _graceFee);
+                i_poolToken.safeTransfer(i_poolHandler.getPoolManager(), _graceFee);
                 s_contributedDuringGracePeriod[msg.sender] = true;
                 (, , , , , , uint256 graceScoreFee, ) = i_poolHandler.getScoreConstants();
 
-                i_poolHandler.decreaseScore(msg.sender, graceScoreFee);
+                _amount += _graceFee;
 
-                (bool sent, ) = payable(i_poolHandler.getPoolManager()).call{value: _graceFee}(""); 
+                i_poolHandler.decreaseScore(msg.sender, graceScoreFee);
 
             } else {
                 // Both windows expired — contribution not accepted on-chain
@@ -519,7 +614,7 @@ contract LiquiPoolVault {
             }
 
             s_hasContributedThisRound[msg.sender] = true;
-            emit ContributionReceived(msg.sender, s_currentRound + 1, msg.value);
+            emit ContributionReceived(msg.sender, s_currentRound + 1, _amount);
         }
 
 
@@ -618,17 +713,11 @@ contract LiquiPoolVault {
 
             i_poolHandler.increaseScore(roundWinner, scoreBidWinner);
         } else {
-            // ── Path B: no bid — pseudo-random fallback ──
-            // TODO: Replace with Chainlink VRF request in future upgrade
-            uint256 randomIndex = uint256(
-                keccak256(abi.encodePacked(block.timestamp, block.prevrandao, s_currentRound))
-            ) % s_eligibleBidders.length;
+             
+            s_randomPool.requestRandom(s_currentRound + 1);
 
-            roundWinner         = s_eligibleBidders[randomIndex];
-            winnerPayout        = (totalPool * 90) / 100;
-            memberDividendTotal = (totalPool * 5) / 100;
-            treasuryAmount      = totalPool - winnerPayout - memberDividendTotal;
-        }
+            return ;
+         }
 
         // ── Record winner ────────────────────────
         s_roundWinners.push(roundWinner);
@@ -649,8 +738,7 @@ contract LiquiPoolVault {
 
         for (uint256 i = 0; i < allMembers.length; i++) {
             if (perMemberDividend > 0) {
-                (bool sent, ) = payable(allMembers[i]).call{value: perMemberDividend}("");
-                if (!sent) revert LiquiPoolVault__TransferFailed(allMembers[i], perMemberDividend);
+               i_poolToken.safeTransfer(allMembers[i], perMemberDividend);
             }
         }
 
@@ -658,12 +746,10 @@ contract LiquiPoolVault {
         treasuryAmount += dust;
 
         // ── Send treasury amount to pool manager ─
-        (bool treasurySent, ) = payable(i_poolHandler.getPoolManager()).call{value: treasuryAmount}("");
-        if (!treasurySent) revert LiquiPoolVault__TransferFailed(i_poolHandler.getPoolManager(), treasuryAmount);
+         i_poolToken.safeTransfer(i_poolHandler.getPoolManager(), treasuryAmount);
 
         // ── Pay round winner ─────────────────────
-        (bool winnerSent, ) = payable(roundWinner).call{value: winnerPayout}("");
-        if (!winnerSent) revert LiquiPoolVault__TransferFailed(roundWinner, winnerPayout);
+      i_poolToken.safeTransfer(roundWinner, winnerPayout);
 
         s_isCurrentRoundSettled = true;
 
@@ -761,15 +847,16 @@ contract LiquiPoolVault {
 
   
 
-    /// @notice Returns the vault's current ETH balance
-    function getVaultBalance() public view returns (uint256) {
-        return address(this).balance;
-    }
+    /// @notice Returns the vault's current Token balance
+  function getVaultTokenBalance() public view returns (uint256) {
+    return i_poolToken.balanceOf(address(this));
+}
 
 
-    // ═══════════════════════════════════════════════
-    //  FALLBACK
-    // ═══════════════════════════════════════════════
+   /// @notice Returns the token address used by this pool
+    function getPoolTokenAddress() public view returns (address) {
+    return address(i_poolToken);
+}
 
-    receive() external payable {}
+  
 }
